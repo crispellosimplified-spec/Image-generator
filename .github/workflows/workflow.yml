@@ -17,7 +17,7 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
-      - run: pip install google-generativeai -q
+      - run: pip install google-genai -q
       - name: Generate (Key 1)
         env:
           GEMINI_KEY_1: ${{ secrets.GEMINI_KEY_1 }}
@@ -38,7 +38,7 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
-      - run: pip install google-generativeai -q
+      - run: pip install google-genai -q
       - name: Generate (Key 2)
         env:
           GEMINI_KEY_2: ${{ secrets.GEMINI_KEY_2 }}
