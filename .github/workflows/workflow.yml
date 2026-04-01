@@ -8,7 +8,6 @@ on:
     - cron: "0 0 * * *"
 
 jobs:
-
   key1:
     runs-on: ubuntu-latest
     timeout-minutes: 360
@@ -18,7 +17,7 @@ jobs:
         with:
           python-version: "3.11"
       - run: pip install google-genai -q
-      - name: Generate (Key 1)
+      - name: Run Key 1
         env:
           GEMINI_KEY_1: ${{ secrets.GEMINI_KEY_1 }}
           KEY_ID: "1"
@@ -39,7 +38,7 @@ jobs:
         with:
           python-version: "3.11"
       - run: pip install google-genai -q
-      - name: Generate (Key 2)
+      - name: Run Key 2
         env:
           GEMINI_KEY_2: ${{ secrets.GEMINI_KEY_2 }}
           KEY_ID: "2"
