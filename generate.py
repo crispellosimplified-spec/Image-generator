@@ -1,78 +1,145 @@
-#!/usr/bin/env python3
-# Confirmed working - gemini-2.0-flash-exp
-# Source: developers.googleblog.com + dev.to verified examples
+import os
+import time
+import logging
+from pathlib import Path
+from typing import List, Tuple
 
 from google import genai
-from google.genai import types
-import os, time, json
-from pathlib import Path
 
-KEY_ID  = int(os.environ.get("KEY_ID", "1"))
-API_KEY = os.environ.get(f"GEMINI_KEY_{KEY_ID}", "")
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s | %(levelname)s | %(message)s"
+)
 
-if not API_KEY:
-    print(f"ERROR: GEMINI_KEY_{KEY_ID} secret not set!")
-    exit(1)
+MODEL_NAME = os.getenv("MODEL_NAME", "gemini-2.5-flash-image")
+PROMPTS_FILE = os.getenv("PROMPTS_FILE", "prompts.txt")
+OUT_DIR = Path(os.getenv("OUT_DIR", "output"))
+MAX_RETRIES = int(os.getenv("MAX_RETRIES", "5"))
+RETRY_DELAY_SECONDS = int(os.getenv("RETRY_DELAY_SECONDS", "3"))
 
-src = Path("prompts.txt")
-if not src.exists():
-    print("ERROR: prompts.txt not found!")
-    exit(1)
+API_KEY_1 = os.getenv("GEMINI_API_KEY_1", "").strip()
+API_KEY_2 = os.getenv("GEMINI_API_KEY_2", "").strip()
 
-ALL   = [l.strip() for l in src.read_text("utf-8").splitlines()
-         if l.strip() and not l.startswith("#")]
-TOTAL = len(ALL)
-mine  = [(i, ALL[i]) for i in range(TOTAL) if i % 2 == (KEY_ID - 1)]
 
-print(f"Key {KEY_ID} | {len(mine)} prompts | gemini-2.0-flash-exp")
+def load_prompts(file_path: str) -> List[str]:
+    p = Path(file_path)
+    if not p.exists():
+        raise FileNotFoundError(f"Prompts file not found: {file_path}")
 
-client = genai.Client(api_key=API_KEY)
-OUT    = Path("output")
-OUT.mkdir(exist_ok=True)
+    prompts: List[str] = []
+    for raw in p.read_text(encoding="utf-8").splitlines():
+        line = raw.strip()
+        if not line:
+            continue
+        if line.startswith("#"):
+            continue
+        prompts.append(line)
 
-def make(prompt):
-    for attempt in range(1, 4):
+    return prompts
+
+
+def make_clients() -> List[genai.Client]:
+    keys = [k for k in [API_KEY_1, API_KEY_2] if k]
+    if not keys:
+        raise ValueError("At least one Gemini API key is required in secrets.")
+
+    return [genai.Client(api_key=key) for key in keys]
+
+
+def split_half(prompts: List[str]) -> Tuple[List[str], List[str]]:
+    mid = (len(prompts) + 1) // 2
+    return prompts[:mid], prompts[mid:]
+
+
+def save_first_image_from_response(response, filename_base: str) -> List[str]:
+    saved_files = []
+
+    # Save only the first image part for clean 0001.png style naming
+    image_index = 1
+    for part in getattr(response, "parts", []):
+        inline_data = getattr(part, "inline_data", None)
+        if inline_data is None:
+            continue
+
+        img = part.as_image()
+        out_path = OUT_DIR / f"{filename_base}.png" if image_index == 1 else OUT_DIR / f"{filename_base}_{image_index}.png"
+        img.save(out_path)
+        saved_files.append(str(out_path))
+        break
+
+    return saved_files
+
+
+def generate_for_prompt(client: genai.Client, prompt: str, filename_base: str) -> List[str]:
+    response = client.models.generate_content(
+        model=MODEL_NAME,
+        contents=[prompt],
+    )
+    return save_first_image_from_response(response, filename_base)
+
+
+def process_prompt_with_retry(
+    clients: List[genai.Client],
+    prompt: str,
+    index: int,
+    assigned_client_index: int
+) -> bool:
+    filename_base = f"{index:04d}"
+
+    last_error = None
+    for attempt in range(1, MAX_RETRIES + 1):
+        # first retry uses assigned client, next retry flips to the other client
+        client_index = (assigned_client_index + (attempt - 1)) % len(clients)
+        client = clients[client_index]
+
         try:
-            resp = client.models.generate_content(
-                model="gemini-2.0-flash-exp",
-                contents=prompt,
-                config=types.GenerateContentConfig(
-                    response_modalities=["Text", "Image"]
-                )
+            logging.info(
+                f"Prompt {index:04d} | attempt {attempt}/{MAX_RETRIES} | client {client_index + 1}"
             )
-            for part in resp.candidates[0].content.parts:
-                if part.inline_data is not None:
-                    d = part.inline_data.data
-                    if len(d) > 1000:
-                        return d
-            print(f"  no image returned, attempt {attempt}")
+            saved = generate_for_prompt(client, prompt, filename_base)
+
+            if not saved:
+                raise RuntimeError("Model returned no image data.")
+
+            logging.info(f"Saved: {saved[0]}")
+            return True
+
         except Exception as e:
-            err = str(e)
-            print(f"  err attempt {attempt}: {err[:80]}")
-            if "429" in err or "quota" in err.lower():
-                print("  rate limit - sleep 65s")
-                time.sleep(65)
-            elif "400" in err:
-                return None
-            else:
-                time.sleep(attempt * 4)
-    return None
+            last_error = e
+            logging.warning(f"Prompt {index:04d} failed on attempt {attempt}: {e}")
+            if attempt < MAX_RETRIES:
+                time.sleep(RETRY_DELAY_SECONDS)
 
-ok = fail = 0
-for idx, prompt in mine:
-    n    = idx + 1
-    path = OUT / f"{n}.png"
-    if path.exists() and path.stat().st_size > 1000:
-        print(f"skip {n}.png"); ok += 1; continue
+    logging.error(f"Prompt {index:04d} failed permanently: {last_error}")
+    return False
 
-    print(f"gen {n}/{TOTAL}: {prompt[:55]}...")
-    data = make(prompt)
-    if data:
-        path.write_bytes(data)
-        print(f"  OK {n}.png ({len(data)//1024}KB)"); ok += 1
-    else:
-        print(f"  FAIL {n}.png"); fail += 1
-    time.sleep(6)
 
-print(f"\nKey {KEY_ID}: {ok} ok, {fail} fail")
-(OUT / "report.json").write_text(json.dumps({"key": KEY_ID, "ok": ok, "fail": fail}))
+def main():
+    OUT_DIR.mkdir(parents=True, exist_ok=True)
+
+    prompts = load_prompts(PROMPTS_FILE)
+    if not prompts:
+        raise ValueError("No prompts found in prompts.txt")
+
+    clients = make_clients()
+
+    # Half-half split between the keys
+    half_1, half_2 = split_half(prompts)
+
+    jobs = []
+    for i, prompt in enumerate(half_1, start=1):
+        jobs.append((prompt, i, 0))  # key 1
+    for i, prompt in enumerate(half_2, start=len(half_1) + 1):
+        jobs.append((prompt, i, min(1, len(clients) - 1)))  # key 2 if present
+
+    success_count = 0
+    for prompt, idx, client_idx in jobs:
+        ok = process_prompt_with_retry(clients, prompt, idx, client_idx)
+        if ok:
+            success_count += 1
+
+    logging.info(f"Done. Success: {success_count}/{len(prompts)}")
+
+
+if __name__ == "__main__":
+    main()
